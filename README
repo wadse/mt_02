@@ -1,0 +1,39 @@
+## This code was modified from the decoder available at 
+## https://github.com/callison-burch/dreamt.git
+
+There are three programs in this submission. These files each represent a 
+command; they are decode, hill and print_pickle. They work together with models.py 
+and the data provided in the decoder directory of the source mentioned above.
+The grader in the example below can also be in that directory.
+
+These commands are designed to be used in a pipeline. You would run:
+
+> ./decode -k 5 -j 3 -a 0.01 -f decode_pickle
+> ./hill -k 10 -i decode_pickle -o hill_pickle
+> ./print_pickle -f hill_pickle | ./grade
+
+Decode is used to store into a pickle file a list containing a data structure for
+each sentence pair. This data structure looks like [(f1, e1), (f2, e2), ...], where
+f_i is stored as a list of French words and e_i is stored as an English string.
+The output pickle can be passed directly to print_pickle to produce English sentences.
+
+The important options for decode are:
+ -k: how many translations to consider for each French phrase
+ -j: how far the model is allowed to jump when reordering
+ -a: the parameter for beam search (fraction of the top scoring hypothesis in each stack 
+     to set as minimum for consideration)
+ -f: where to save the pickle file
+
+Hill is used to test small changes to possible solutions (named for 'hill climbing').
+A modification done here was an attempt to reach a better overall score; instead of just
+considering neighbors, this functions also checks neighbors of neighbors (which makes 
+it run much slower). The output is the same format as the output of decode, and can 
+be passed to print_pickle.
+
+The important options for hill are:
+ -k: how many translations to consider for each French phrase
+ -i: input pickle file
+ -o: output pickle file 
+
+Print_pickle simply takes a pickle file and prints all the English sentences present in
+it. The only option is -f, which is the file you wish to print.

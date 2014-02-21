@@ -1,0 +1,14 @@
+#!/usr/bin/env python
+import optparse
+import pickle
+
+optparser = optparse.OptionParser()
+optparser.add_option("-f", "--file", dest="file", default='hill_pickle', help="File to read pickle from")
+opts = optparser.parse_args()[0]
+
+ptr = open(opts.file, 'r')
+input = pickle.load(ptr)
+ptr.close()
+
+for sentence in input:
+    print ' '.join([p[1] for p in sentence])	

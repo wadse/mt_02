@@ -1,0 +1,148 @@
+#!/usr/bin/env python
+import optparse
+import sys
+import models
+import math
+import pickle
+from collections import namedtuple, defaultdict
+
+## Some helper functions ##########################
+def div_single(arr):
+  if len(arr) == 0: return arr
+  result = []
+  new_div = [arr.pop(0)]
+  while len(arr) > 0:
+    x = arr.pop(0)
+    if x == new_div[-1] + 1: new_div.append(x)
+    else:
+      result.append(new_div)
+      new_div = [x]
+  result.append(new_div)
+  return result
+
+def div_multiple(arr):
+  result = []
+  for a in arr: 
+    result.extend(div_single(a))
+  return result
+
+def future_cost(french):
+  n = len(french)
+  cost = defaultdict(lambda: [-1000, -1000, ''])
+  for length in xrange(1, n+1):
+    for start in xrange(n - length + 1):
+      end = start + length - 1
+      # now, we have every possible length in the phrase
+      f = french[start:end+1]
+      if f in tm:
+        maxprob = sorted(tm[f], key=lambda t: -t.logprob)[0]
+        cost[(start, end)] = [maxprob.logprob, lm_phrase(maxprob.english), maxprob.english]
+      for i in xrange(start, end + 1):
+        split_tm_cost = cost[(start, i)][0] + cost[(i+1, end)][0]
+        split_english = cost[(start, i)][2] + ' ' + cost[(i+1, end)][2]
+        split_lm_cost = lm_phrase(split_english)
+        if split_tm_cost + split_lm_cost > cost[(start, end)][0] + cost[(start, end)][1]:
+          cost[(start, end)] = [split_tm_cost, split_lm_cost, split_english]
+  return cost
+
+def lm_phrase(e):
+  cost = 0.0
+  lm_state = lm.begin()
+  for word in e.split():
+    (lm_state, word_logprob) = lm.score(lm_state, word)
+    cost += word_logprob
+  cost += lm.end(lm_state)
+  return cost
+  
+###################################################
+
+optparser = optparse.OptionParser()
+optparser.add_option("-i", "--input", dest="input", default="data/input", help="File containing sentences to translate (default=data/input)")
+optparser.add_option("-t", "--translation-model", dest="tm", default="data/tm", help="File containing translation model (default=data/tm)")
+optparser.add_option("-l", "--language-model", dest="lm", default="data/lm", help="File containing ARPA-format language model (default=data/lm)")
+optparser.add_option("-n", "--num_sentences", dest="num_sents", default=sys.maxint, type="int", help="Number of sentences to decode (default=no limit)")
+optparser.add_option("-k", "--translations-per-phrase", dest="k", default=1, type="int", help="Limit on number of translations to consider per phrase (default=1)")
+optparser.add_option("-j", "--jump-size", dest="j", default=1, type="int", help="Maximum jump size (default=1)")
+optparser.add_option("-a", "--alpha", dest="a", default=0.5, type="float", help="Beam 'radius'")
+optparser.add_option("-f", "--file", dest="file", default='init_pickle', help="File to store pickle in")
+optparser.add_option("-v", "--verbose", dest="verbose", action="store_true", default=False,  help="Verbose mode (default=off)")
+opts = optparser.parse_args()[0]
+
+tm = models.TM(opts.tm, opts.k)
+lm = models.LM(opts.lm)
+french = [tuple(line.strip().split()) for line in open(opts.input).readlines()[:opts.num_sents]]
+
+alpha = math.log(opts.a)
+
+# tm should translate unknown words as-is with probability 1
+for word in set(sum(french,())):
+  if (word,) not in tm:
+    tm[(word,)] = [models.phrase(word, 0.0)]
+
+hypothesis = namedtuple("hypothesis", "logprob, futureprob, lm_state, predecessor, f_phrase, phrase, untranslated, end")
+output = []
+
+sys.stderr.write("Decoding %s...\n" % (opts.input,))
+for f in french:
+  sys.stderr.write("Translating: %s\n" % (' '.join(f)))
+  fc = future_cost(f)
+  initial_hypothesis = hypothesis(0.0, 0.0, lm.begin(), None, tuple(), None, [range(len(f))], 0)
+  stacks = [{} for _ in f] + [{}]
+  stacks[0][lm.begin()] = initial_hypothesis
+  for i, stack in enumerate(stacks[:-1]):
+    best = max([h.logprob + h.futureprob for h in stack.itervalues()])
+    for h in [h for h in stack.itervalues() if h.logprob + h.futureprob > best + alpha]:
+      for (c, chunk) in enumerate(h.untranslated):
+        for (s, start) in enumerate(chunk):
+          # check if we're jumping too far forwards
+#          if (c == len(h.untranslated) - 1) and (s >= opts.j): continue
+          distance = abs(start - h.end)
+          if distance >= opts.j: continue
+          # distance jumped is where we're starting compared to where we last ended
+          for end in chunk[s:]:
+            end += 1
+            f_phrase = tuple(f[start:end])
+            if f_phrase in tm:
+              for phrase in tm[f_phrase]:
+                # make a copy of the currently untranslated chunks
+                untranslated = [ch[:] for ch in h.untranslated]
+                # take out the words we are translating
+                for word_position in xrange(start, end):
+                  untranslated[c].remove(word_position)
+                  # note that by the time we remove the last element of c, we will have 
+                  # run out of words to remove since we only count contiguous phrases
+                # break the untranslated words back into chunks
+                untranslated = div_multiple(untranslated)
+                # grab the future cost (sum of future cost of every chunk left untranslated)
+                fut = sum([fc[(ch[0], ch[-1])][0] + fc[(ch[0], ch[-1])][1] for ch in untranslated])
+                # total logprob = current logprob + tm.logprob
+                # distortion model excluded; significantly decreased final grade
+                logprob = h.logprob + phrase.logprob
+                # increment logprob by lm costs
+                lm_state = h.lm_state
+                for word in phrase.english.split():
+                  (lm_state, word_logprob) = lm.score(lm_state, word)
+                  logprob += word_logprob
+                if end == len(f): logprob += lm.end(lm_state)
+                # create the next hypothesis
+                new_hypothesis = hypothesis(logprob, fut, lm_state, h, f_phrase, phrase, untranslated, end)
+                # stacknum = total words translated
+                stacknum = len(f) - sum([len(x) for x in untranslated])
+                # add to stack if non-existent, or better version of recombination
+                if lm_state not in stacks[stacknum] or logprob + fut > stacks[stacknum][lm_state].logprob + stacks[stacknum][lm_state].futureprob:
+                  stacks[stacknum][lm_state] = new_hypothesis 
+  winner = max(stacks[-1].itervalues(), key=lambda h: h.logprob)
+
+  pairs = []
+  def add_pair(h):
+    if h.phrase == None: return
+    pairs.insert(0, (h.f_phrase, h.phrase.english, h.phrase.logprob))
+    add_pair(h.predecessor)
+  add_pair(winner)
+
+  output.append(pairs)
+
+ptr = open(opts.file, 'w')
+pickle.dump(output, ptr)
+ptr.close()
+

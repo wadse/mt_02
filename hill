@@ -1,0 +1,123 @@
+#!/usr/bin/env python
+import optparse
+import copy
+import pickle
+import models
+import sys
+
+optparser = optparse.OptionParser()
+optparser.add_option("-f", "--input", dest="input", default="data/input", help="File containing sentences to translate (default=data/input)")
+optparser.add_option("-t", "--translation-model", dest="tm", default="data/tm", help="File containing translation model (default=data/tm)")
+optparser.add_option("-l", "--language-model", dest="lm", default="data/lm", help="File containing ARPA-format language model (default=data/lm)")
+optparser.add_option("-i", "--infile", dest="infile", default='init_pickle', help="File to load pickle from")
+optparser.add_option("-o", "--outfile", dest="outfile", default='hill_pickle', help="File to store pickle in")
+optparser.add_option("-k", "--translations-per-phrase", dest="k", default=1, type="int", help="Limit on number of translations to consider per phrase (default=1)")
+opts = optparser.parse_args()[0]
+
+tm = models.TM(opts.tm, opts.k)
+lm = models.LM(opts.lm)
+french = [tuple(line.strip().split()) for line in open(opts.input).readlines()]
+# tm should translate unknown words as-is with probability 1
+for word in set(sum(french,())):
+  if (word,) not in tm:
+    tm[(word,)] = [models.phrase(word, 0.0)]
+
+ptr = open(opts.infile, 'r')
+input = pickle.load(ptr)
+ptr.close()
+
+# score a set of french-english pairs
+def score_pairs(pairs):
+  lm_state = lm.begin()
+  logprob = 0.0
+  for pair in pairs:
+    for word in pair[1].split():
+      (lm_state, word_logprob) = lm.score(lm_state, word)
+      logprob += word_logprob
+    logprob += pair[2]
+  logprob += lm.end(lm_state)
+  return logprob
+
+def neighbors(pairs):
+
+  # covered by shift_neighbors
+  #swap_neighbors = []
+  #for i in xrange(len(pairs) - 1):
+  #  swap_neighbors.append(pairs[:i] + [pairs[i+1]] + [pairs[i]] + pairs[i+2:])
+
+  shift_neighbors = []
+  for i in xrange(len(pairs)):
+    for j in xrange(len(pairs)):
+      c = copy.deepcopy(pairs)
+      c.remove(pairs[i])
+      c.insert(j, pairs[i])
+      shift_neighbors.append(c)
+
+  join_neighbors = []
+  for i in xrange(len(pairs) - 1):
+    joint_french = pairs[i][0] + pairs[i+1][0]
+    if joint_french in tm:
+      joint_phrase = max(tm[joint_french], key=lambda p: p.logprob)
+      join_neighbors.append(pairs[:i] + [(joint_french, joint_phrase.english, joint_phrase.logprob)] + pairs[i+2:])
+
+  split_neighbors = []
+  for i in xrange(len(pairs)):
+    split_french = pairs[i][0]
+    split_choices = [(split_french[:j], split_french[j:]) for j in range(1, len(split_french))]
+    for sc in split_choices:
+      first_french = tuple(sc[0])
+      second_french = tuple(sc[1])
+      if first_french in tm and second_french in tm:
+        first_phrase = max(tm[first_french], key=lambda p: p.logprob)
+        second_phrase = max(tm[second_french], key=lambda p: p.logprob)
+        first_pair = (first_french, first_phrase.english, first_phrase.logprob)
+        second_pair = (second_french, second_phrase.english, second_phrase.logprob)
+        split_neighbors.append(pairs[:i] + [first_pair] + [second_pair] + pairs[i+1:])
+
+  replace_neighbors = []
+  for i in xrange(len(pairs)):
+    rep_french = pairs[i][0]
+    rep_eng = pairs[i][1]
+    for phrase in tm[rep_french]:
+      if phrase.english == rep_eng: continue
+      new_pair = (rep_french, phrase.english, phrase.logprob)
+      replace_neighbors.append(pairs[:i] + [new_pair] + pairs[i+1:])
+
+  bireplace_neighbors = []
+  for i in xrange(len(pairs) - 1):
+    first_french = pairs[i][0]
+    second_french = pairs[i+1][0]
+    first_eng = pairs[i][1]
+    second_eng = pairs[i+1][1]
+    for first_phrase in tm[first_french]:
+      if first_phrase.english == first_eng: continue
+      for second_phrase in tm[second_french]:
+        if second_phrase.english == second_eng: continue
+        new_first = (first_french, first_phrase.english, first_phrase.logprob)
+        new_second = (second_french, second_phrase.english, second_phrase.logprob)
+        bireplace_neighbors.append(pairs[:i] + [new_first] + [new_second] + pairs[i+1:])
+
+  return shift_neighbors + join_neighbors + split_neighbors + replace_neighbors + bireplace_neighbors
+
+def greedy(pairs):
+  current = pairs
+  while (True):
+    s_curr = score_pairs(current)
+    s = s_curr
+    for nn in neighbors(pairs):
+      for n in [nn] + neighbors(nn):
+        s_n = score_pairs(n)
+        if s_n > s:
+          s = s_n
+          best = n
+    if s == s_curr: return current
+    else: current = best
+
+output = []
+for i, pairs in enumerate(input):
+  print i
+  output.append(greedy(pairs))
+
+ptr = open(opts.outfile, 'w')
+pickle.dump(output, ptr)
+ptr.close()
